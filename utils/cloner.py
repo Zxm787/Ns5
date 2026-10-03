@@ -4,6 +4,7 @@ import asyncio
 import sys
 import json
 import aiohttp
+import unicodedata
 
 init(autoreset=True)
 
@@ -14,6 +15,26 @@ with open("./utils/config.json", "r") as json_file:
 # إعدادات إعادة المحاولة عند أخطاء الشبكة
 MAX_RETRIES = 3
 BASE_RETRY_DELAY = 2  # ثواني
+
+
+# ----------------------------------------------------------------------
+# أدوات المقارنة التامة 100% (Unicode-safe, case-sensitive)
+# ----------------------------------------------------------------------
+def _norm(name):
+    """
+    تطبيع Unicode بصيغة NFC.
+    - يحافظ على حالة الأحرف (كبيرة/صغيرة).
+    - يحافظ على الحروف العربية والعلامات الخاصة والمسافات.
+    - يوحّد الأشكال المتكافئة (مثل أ المُدمج والمفكك).
+    """
+    if name is None:
+        return ""
+    return unicodedata.normalize("NFC", name)
+
+
+def _exists(name, existing_set):
+    """فحص وجود الاسم بمطابقة تامة وحساسة لحالة الأحرف."""
+    return _norm(name) in existing_set
 
 
 def clear_line(n=1):
@@ -46,16 +67,10 @@ def logs(message, type, number=None):
 class Cloner:
 
     # ------------------------------------------------------------------
-    # دالة مساعدة: تنفيذ عملية بأمان مع إعادة المحاولة عند أخطاء الشبكة
+    # تنفيذ عملية بأمان مع إعادة المحاولة عند أخطاء الشبكة
     # ------------------------------------------------------------------
     @staticmethod
     async def _safe(op_factory, description, max_retries=MAX_RETRIES):
-        """
-        ينفذ عملية غير متزامنة بأمان.
-        - op_factory: دالة (lambda) تُرجع coroutine جديد في كل استدعاء.
-        - description: وصف العملية لسجلات الأخطاء.
-        يعيد النتيجة أو None عند الفشل النهائي (بدون رفع استثناء).
-        """
         for attempt in range(1, max_retries + 1):
             try:
                 return await op_factory()
@@ -66,7 +81,7 @@ class Cloner:
 
             except discord.HTTPException as e:
                 status = getattr(e, 'status', None)
-                if status == 429:  # rate limit
+                if status == 429:
                     retry_after = getattr(e, 'retry_after', 2) or 2
                     logs(f"Rate limited on {description}, waiting {retry_after}s", 'warning')
                     await asyncio.sleep(retry_after)
@@ -92,7 +107,7 @@ class Cloner:
         return None
 
     # ------------------------------------------------------------------
-    # نسخ بيانات السيرفر الأساسية (الاسم + الأيقونة)
+    # نسخ بيانات السيرفر الأساسية
     # ------------------------------------------------------------------
     @staticmethod
     async def guild_create(guild_to: discord.Guild, guild_from: discord.Guild):
@@ -103,13 +118,14 @@ class Cloner:
             except Exception as e:
                 logs(f"Can't read icon image from {guild_from.name}: {e}", 'warning')
 
-            if guild_to.name != guild_from.name:
+            # مقارنة الاسم بمطابقة تامة 100%
+            if _norm(guild_to.name) == _norm(guild_from.name):
+                logs(f"Guild name already matches exactly: {guild_to.name}", 'skip')
+            else:
                 await Cloner._safe(
                     lambda: guild_to.edit(name=guild_from.name),
                     f"rename guild to {guild_from.name}"
                 )
-            else:
-                logs(f"Guild name already matches: {guild_to.name}", 'skip')
 
             if icon_image is not None:
                 await Cloner._safe(
@@ -124,11 +140,13 @@ class Cloner:
             logs(f"guild_create failed: {e}", 'error')
 
     # ------------------------------------------------------------------
-    # نسخ الرتب (Roles) — التحقق من الاسم قبل الإنشاء
+    # نسخ الرتب — مطابقة تامة 100%
     # ------------------------------------------------------------------
     @staticmethod
     async def roles_create(guild_to: discord.Guild, guild_from: discord.Guild):
-        existing_names = {r.name for r in guild_to.roles}
+        # نطبّع أسماء الرتب الموجودة في الهدف
+        existing_names = {_norm(r.name) for r in guild_to.roles}
+
         roles = [r for r in guild_from.roles if r.name != "@everyone"]
         roles.reverse()
 
@@ -136,8 +154,8 @@ class Cloner:
 
         for role in roles:
             try:
-                if role.name in existing_names:
-                    logs(f"Role already exists, skipping: {role.name}", 'skip')
+                if _exists(role.name, existing_names):
+                    logs(f"Role already exists (exact match), skipping: {role.name}", 'skip')
                     skipped += 1
                     continue
 
@@ -154,7 +172,7 @@ class Cloner:
 
                 if result is not None:
                     created += 1
-                    existing_names.add(role.name)
+                    existing_names.add(_norm(role.name))
                     logs(f"Created Role {role.name}", 'add')
                 else:
                     failed += 1
@@ -169,18 +187,18 @@ class Cloner:
         logs(f"Roles → created: {created}, skipped: {skipped}, failed: {failed}", 'add', True)
 
     # ------------------------------------------------------------------
-    # نسخ الفئات (Categories) — التحقق من الاسم قبل الإنشاء
+    # نسخ الفئات — مطابقة تامة 100%
     # ------------------------------------------------------------------
     @staticmethod
     async def categories_create(guild_to: discord.Guild, guild_from: discord.Guild):
-        existing_names = {c.name for c in guild_to.categories}
+        existing_names = {_norm(c.name) for c in guild_to.categories}
 
         created = skipped = failed = 0
 
         for channel in guild_from.categories:
             try:
-                if channel.name in existing_names:
-                    logs(f"Category already exists, skipping: {channel.name}", 'skip')
+                if _exists(channel.name, existing_names):
+                    logs(f"Category already exists (exact match), skipping: {channel.name}", 'skip')
                     skipped += 1
                     continue
 
@@ -203,7 +221,7 @@ class Cloner:
                         f"reposition category {channel.name}"
                     )
                     created += 1
-                    existing_names.add(channel.name)
+                    existing_names.add(_norm(channel.name))
                     logs(f"Created Category: {channel.name}", 'add')
                 else:
                     failed += 1
@@ -218,13 +236,15 @@ class Cloner:
         logs(f"Categories → created: {created}, skipped: {skipped}, failed: {failed}", 'add', True)
 
     # ------------------------------------------------------------------
-    # نسخ القنوات (نصية + صوتية) — التحقق من الاسم قبل الإنشاء
+    # نسخ القنوات — مطابقة تامة 100% (حساسة لحالة الأحرف)
     # ------------------------------------------------------------------
     @staticmethod
     async def channels_create(guild_to: discord.Guild, guild_from: discord.Guild):
-        # Discord يخزّن أسماء القنوات بحروف صغيرة
-        existing_text = {c.name.lower() for c in guild_to.text_channels}
-        existing_voice = {c.name.lower() for c in guild_to.voice_channels}
+        # ⚠️ ملاحظة: تم إزالة .lower() لتحقيق مطابقة 100%
+        # Discord نفسه يخزّن أسماء القنوات بحروف صغيرة والمسافات →
+        # لذا الأسماء القادمة من API ستكون موحّدة، والمقارنة التامة صحيحة.
+        existing_text = {_norm(c.name) for c in guild_to.text_channels}
+        existing_voice = {_norm(c.name) for c in guild_to.voice_channels}
 
         channels = list(guild_from.text_channels) + list(guild_from.voice_channels)
 
@@ -235,8 +255,8 @@ class Cloner:
                 is_text = isinstance(channel, discord.TextChannel)
                 existing_set = existing_text if is_text else existing_voice
 
-                if channel.name.lower() in existing_set:
-                    logs(f"Channel already exists, skipping: {channel.name}", 'skip')
+                if _exists(channel.name, existing_set):
+                    logs(f"Channel already exists (exact match), skipping: {channel.name}", 'skip')
                     skipped += 1
                     continue
 
@@ -266,7 +286,7 @@ class Cloner:
                             f"move channel {channel.name} to category"
                         )
                     created += 1
-                    existing_set.add(channel.name.lower())
+                    existing_set.add(_norm(channel.name))
                     kind = "Text" if is_text else "Voice"
                     logs(f"Created {kind} Channel: {channel.name}", 'add')
                 else:
@@ -282,18 +302,18 @@ class Cloner:
         logs(f"Channels → created: {created}, skipped: {skipped}, failed: {failed}", 'add', True)
 
     # ------------------------------------------------------------------
-    # نسخ الإيموجي — التحقق من الاسم قبل الإنشاء
+    # نسخ الإيموجي — مطابقة تامة 100%
     # ------------------------------------------------------------------
     @staticmethod
     async def emojis_create(guild_to: discord.Guild, guild_from: discord.Guild):
-        existing_names = {e.name for e in guild_to.emojis}
+        existing_names = {_norm(e.name) for e in guild_to.emojis}
 
         created = skipped = failed = 0
 
         for emoji in guild_from.emojis:
             try:
-                if emoji.name in existing_names:
-                    logs(f"Emoji already exists, skipping: {emoji.name}", 'skip')
+                if _exists(emoji.name, existing_names):
+                    logs(f"Emoji already exists (exact match), skipping: {emoji.name}", 'skip')
                     skipped += 1
                     continue
 
@@ -308,7 +328,7 @@ class Cloner:
 
                 if result is not None:
                     created += 1
-                    existing_names.add(emoji.name)
+                    existing_names.add(_norm(emoji.name))
                     logs(f"Created Emoji {emoji.name}", 'add')
                 else:
                     failed += 1
