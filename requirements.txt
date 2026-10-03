@@ -1,0 +1,7 @@
+discord.py==1.7.3
+discord==1.7.3
+colorama==0.4.4
+psutil==5.9.0
+pypresence==4.2.1
+rich==13.7.1
+aiohttp_socks==0.8.4
