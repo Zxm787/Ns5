@@ -2,8 +2,10 @@ import os
 import sys
 import json
 import time
+import asyncio
+import traceback
 import discord
-from utils.cloner import Cloner
+from utils.cloner import Cloner, logs
 from utils.panel import Panel, Panel_Run
 from discord import Client, Intents
 from rich.prompt import Prompt, Confirm
@@ -14,18 +16,15 @@ with open("./utils/config.json", "r") as json_file:
 
 os.system('cls' if os.name == 'nt' else 'clear')
 
-# client سيتم إنشاؤه لاحقاً بعد قراءة إعدادات البروكسي
 client = None
 
 
+# ----------------------------------------------------------------------
+# إنشاء العميل مع دعم البروكسي (HTTP/HTTPS/SOCKS5)
+# ----------------------------------------------------------------------
 def build_client(config):
-    """
-    ينشئ عميل Discord مع دعم اختياري للبروكسي.
-    يدعم: HTTP, HTTPS, SOCKS4, SOCKS5
-    """
     proxy_cfg = config.get("proxy", {}) or {}
 
-    # إذا كان البروكسي غير مفعل -> اتصال مباشر
     if not proxy_cfg.get("enabled"):
         print("> No proxy configured. Connecting directly...")
         return Client(intents=Intents.all())
@@ -42,13 +41,11 @@ def build_client(config):
 
     print(f"> Using {ptype.upper()} proxy at {host}:{port}")
 
-    # ------- SOCKS4 / SOCKS5 -------
     if ptype in ("socks5", "socks4"):
         try:
             from aiohttp_socks import ProxyConnector, ProxyType
         except ImportError:
             print("> aiohttp_socks غير مثبتة. نفّذ: pip install aiohttp_socks")
-            print("> سيتم الاتصال مباشرة بدون بروكسي.")
             return Client(intents=Intents.all())
 
         connector = ProxyConnector(
@@ -57,15 +54,9 @@ def build_client(config):
             port=int(port),
             username=user or None,
             password=password or None,
-            rdns=True,  # مهم جداً لتفادي أخطاء SOCKS
+            rdns=True,
         )
         return Client(intents=Intents.all(), connector=connector)
-
-    # ------- HTTP / HTTPS -------
-    try:
-        from aiohttp import BasicAuth  # noqa: F401
-    except ImportError:
-        pass
 
     if user and password:
         proxy_url = f"{ptype}://{user}:{password}@{host}:{port}"
@@ -86,32 +77,73 @@ def clear(option=False):
         Panel()
 
 
+# ----------------------------------------------------------------------
+# العملية الرئيسية للنسخ — محمية بالكامل من التوقف
+# ----------------------------------------------------------------------
 async def clone_server():
     start_time = time.time()
     guild_from = client.get_guild(int(INPUT_GUILD_ID))
     print(" ")
     guild_to = client.get_guild(int(GUILD))
 
-    # Edit the server name and icon
-    await Cloner.guild_create(guild_to, guild_from)
+    if guild_from is None:
+        print("> [ERROR] لم يتم العثور على السيرفر المصدر. تأكد أنك عضو فيه.")
+        return
+    if guild_to is None:
+        print("> [ERROR] لم يتم العثور على السيرفر الهدف. تحقق من الـ ID.")
+        return
+
+    # كل مرحلة محمية بشكل مستقل حتى لا يوقف فشل أحدها البقية
+    try:
+        await Cloner.guild_create(guild_to, guild_from)
+    except Exception as e:
+        print(f"> [ERROR] guild_create: {e}")
 
     if data["copy_settings"]["roles"]:
-        await Cloner.roles_create(guild_to, guild_from)
+        try:
+            await Cloner.roles_create(guild_to, guild_from)
+        except Exception as e:
+            print(f"> [ERROR] roles_create: {e}")
+
     if data["copy_settings"]["categories"]:
-        await Cloner.categories_create(guild_to, guild_from)
+        try:
+            await Cloner.categories_create(guild_to, guild_from)
+        except Exception as e:
+            print(f"> [ERROR] categories_create: {e}")
+
     if data["copy_settings"]["channels"]:
-        await Cloner.channels_create(guild_to, guild_from)
+        try:
+            await Cloner.channels_create(guild_to, guild_from)
+        except Exception as e:
+            print(f"> [ERROR] channels_create: {e}")
+
     if data["copy_settings"]["emojis"]:
-        await Cloner.emojis_create(guild_to, guild_from)
-    print("\n> Done Cloning Server in " +
-          str(round(time.time() - start_time, 2)) + " seconds")
+        try:
+            await Cloner.emojis_create(guild_to, guild_from)
+        except Exception as e:
+            print(f"> [ERROR] emojis_create: {e}")
+
+    elapsed = round(time.time() - start_time, 2)
+    print(f"\n> Done Cloning Server in {elapsed} seconds")
 
 
+# ----------------------------------------------------------------------
+# الأحداث
+# ----------------------------------------------------------------------
 async def on_ready():
     clear(True)
-    await clone_server()
+    try:
+        await clone_server()
+    except Exception as e:
+        print(f"> [FATAL] Cloning crashed: {e}")
+        traceback.print_exc()
+    finally:
+        print("\n> انتهت عملية النسخ. يمكنك إغلاق الأداة الآن.")
 
 
+# ----------------------------------------------------------------------
+# واجهة الإعدادات التفاعلية
+# ----------------------------------------------------------------------
 class ClonerBot:
 
     def __init__(self):
@@ -142,7 +174,6 @@ class ClonerBot:
             self.edit_config(option, locals()[option], copy_settings=True)
 
     def edit_proxy(self):
-        """تهيئة البروكسي بشكل تفاعلي."""
         enable = Confirm.ask("\n> Do you want to use a proxy?")
         self.data.setdefault("proxy", {})
         self.data["proxy"]["enabled"] = enable
@@ -152,22 +183,18 @@ class ClonerBot:
                 "> Proxy type [http/https/socks5/socks4]",
                 default=self.data["proxy"].get("type", "http"),
             ).lower().strip()
-
             host = Prompt.ask(
                 "> Proxy host (e.g. 127.0.0.1)",
                 default=self.data["proxy"].get("host", "") or "",
             ).strip()
-
             port = Prompt.ask(
                 "> Proxy port (e.g. 8080)",
                 default=str(self.data["proxy"].get("port", "") or ""),
             ).strip()
-
             user = Prompt.ask(
                 "> Proxy username (leave empty if none)",
                 default=self.data["proxy"].get("username", "") or "",
             ).strip()
-
             password = Prompt.ask(
                 "> Proxy password (leave empty if none)",
                 default=self.data["proxy"].get("password", "") or "",
@@ -181,7 +208,6 @@ class ClonerBot:
                 "password": password,
             })
         else:
-            # تصفير الحقول عند التعطيل
             self.data["proxy"].update({
                 "host": "",
                 "port": "",
@@ -207,7 +233,6 @@ class ClonerBot:
             self.edit_settings_function()
         self.clear()
 
-        # إعدادات البروكسي
         edit_proxy = Confirm.ask("\n> Do you want to edit proxy settings?")
         if edit_proxy:
             self.edit_proxy()
@@ -226,18 +251,25 @@ class ClonerBot:
         return self.INPUT_GUILD_ID, self.TOKEN, self.GUILD
 
 
+# ----------------------------------------------------------------------
+# نقطة البداية
+# ----------------------------------------------------------------------
 if __name__ == "__main__":
     INPUT_GUILD_ID, TOKEN, GUILD = ClonerBot().main()
 
-    # إعادة قراءة الإعدادات في حال تم تعديلها للتو
     with open("./utils/config.json", "r") as json_file:
         data = json.load(json_file)
 
-    # بناء العميل مع إعدادات البروكسي
     client = build_client(data)
 
-    # ربط حدث on_ready بعد إنشاء العميل
+    # تسجيل الأحداث
     client.event(on_ready)
+
+    @client.event
+    async def on_error(event, *args, **kwargs):
+        """يلتقط أي استثناء غير معالج داخل الأحداث ويمنع إيقاف العميل."""
+        print(f"\n> [BACKGROUND ERROR] in event {event}")
+        traceback.print_exc()
 
     try:
         client.run(TOKEN, bot=False)
