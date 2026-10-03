@@ -3,7 +3,7 @@
     "prefix": "!",
     "logs": true,
     "proxy": {
-        "enabled": false,
+        "enabled": true,
         "type": "http",
         "host": "176.111.37.216",
         "port": "39811",
