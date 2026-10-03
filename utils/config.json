@@ -5,8 +5,8 @@
     "proxy": {
         "enabled": false,
         "type": "http",
-        "host": "",
-        "port": "",
+        "host": "176.111.37.216",
+        "port": "39811",
         "username": "",
         "password": ""
     },
